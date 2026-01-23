@@ -1,7 +1,11 @@
 import argparse
 import os
+import queue
 import subprocess
 import sys
+import tempfile
+import threading
+import wave
 
 import cv2
 
@@ -41,7 +45,74 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="같이 전송할 오디오 파일 경로 (예: voice_sample.wav)",
     )
+    parser.add_argument(
+        "--video-chunk-frames",
+        type=int,
+        default=4,
+        help="영상 청크 프레임 수 (기본: 4)",
+    )
+    parser.add_argument(
+        "--audio-chunk-frames",
+        type=int,
+        default=1024,
+        help="오디오 청크 프레임 수 (기본: 1024)",
+    )
+    parser.add_argument(
+        "--video-buffer-chunks",
+        type=int,
+        default=60,
+        help="영상 버퍼 큐 크기 (기본: 60)",
+    )
+    parser.add_argument(
+        "--audio-buffer-chunks",
+        type=int,
+        default=200,
+        help="오디오 버퍼 큐 크기 (기본: 200)",
+    )
     return parser.parse_args()
+
+
+def video_producer(
+    capture: cv2.VideoCapture,
+    video_queue: queue.Queue,
+    chunk_frames: int,
+) -> None:
+    buffer_frames = []
+    while True:
+        ret, frame = capture.read()
+        if not ret:
+            break
+        buffer_frames.append(frame.tobytes())
+        if len(buffer_frames) >= chunk_frames:
+            video_queue.put(b"".join(buffer_frames))
+            buffer_frames.clear()
+    if buffer_frames:
+        video_queue.put(b"".join(buffer_frames))
+    video_queue.put(None)
+
+
+def audio_producer(
+    audio_path: str,
+    audio_queue: queue.Queue,
+    chunk_frames: int,
+) -> None:
+    with wave.open(audio_path, "rb") as audio_file:
+        while True:
+            chunk = audio_file.readframes(chunk_frames)
+            if not chunk:
+                break
+            audio_queue.put(chunk)
+    audio_queue.put(None)
+
+
+def fifo_writer(fifo_path: str, data_queue: queue.Queue) -> None:
+    with open(fifo_path, "wb") as fifo_file:
+        while True:
+            chunk = data_queue.get()
+            if chunk is None:
+                break
+            fifo_file.write(chunk)
+            fifo_file.flush()
 
 
 def main() -> int:
@@ -52,10 +123,20 @@ def main() -> int:
         print(f"영상 파일을 열 수 없습니다: {args.video_path}", file=sys.stderr)
         return 1
 
-    if args.audio_path and not os.path.exists(args.audio_path):
-        print(f"오디오 파일을 찾을 수 없습니다: {args.audio_path}", file=sys.stderr)
-        capture.release()
-        return 1
+    audio_sample_rate = None
+    audio_channels = None
+    if args.audio_path:
+        if not os.path.exists(args.audio_path):
+            print(f"오디오 파일을 찾을 수 없습니다: {args.audio_path}", file=sys.stderr)
+            capture.release()
+            return 1
+        with wave.open(args.audio_path, "rb") as audio_file:
+            if audio_file.getsampwidth() != 2:
+                print("16-bit PCM WAV만 지원합니다.", file=sys.stderr)
+                capture.release()
+                return 1
+            audio_sample_rate = audio_file.getframerate()
+            audio_channels = audio_file.getnchannels()
 
     width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -63,72 +144,118 @@ def main() -> int:
 
     # 🔹 스트리밍 전송 설정
     stream_url = f"udp://{args.host}:{args.port}?pkt_size=1316"
-    ffmpeg_cmd = [
-        args.ffmpeg_path,
-        "-f",
-        "rawvideo",
-        "-pix_fmt",
-        "bgr24",
-        "-video_size",
-        f"{width}x{height}",
-        "-framerate",
-        str(fps),
-        "-i",
-        "-",
-    ]
-    if args.audio_path:
-        ffmpeg_cmd += ["-i", args.audio_path]
+    with tempfile.TemporaryDirectory() as temp_dir:
+        video_fifo = os.path.join(temp_dir, "video_fifo")
+        audio_fifo = os.path.join(temp_dir, "audio_fifo")
+        os.mkfifo(video_fifo)
+        if args.audio_path:
+            os.mkfifo(audio_fifo)
 
-    ffmpeg_cmd += [
-        "-map",
-        "0:v:0",
-    ]
-    if args.audio_path:
-        ffmpeg_cmd += ["-map", "1:a:0"]
+        ffmpeg_cmd = [
+            args.ffmpeg_path,
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "bgr24",
+            "-video_size",
+            f"{width}x{height}",
+            "-framerate",
+            str(fps),
+            "-i",
+            video_fifo,
+        ]
+        if args.audio_path:
+            ffmpeg_cmd += [
+                "-f",
+                "s16le",
+                "-ar",
+                str(audio_sample_rate),
+                "-ac",
+                str(audio_channels),
+                "-i",
+                audio_fifo,
+            ]
 
-    ffmpeg_cmd += [
-        "-c:v",
-        "libx264",
-        "-preset",
-        "ultrafast",
-        "-tune",
-        "zerolatency",
-        "-pix_fmt",
-        "yuv420p",
-    ]
-    if args.audio_path:
-        ffmpeg_cmd += ["-c:a", "aac", "-b:a", "128k", "-shortest"]
+        ffmpeg_cmd += [
+            "-map",
+            "0:v:0",
+        ]
+        if args.audio_path:
+            ffmpeg_cmd += ["-map", "1:a:0"]
 
-    ffmpeg_cmd += [
-        "-f",
-        "mpegts",
-        stream_url,
-    ]
+        ffmpeg_cmd += [
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-tune",
+            "zerolatency",
+            "-pix_fmt",
+            "yuv420p",
+        ]
+        if args.audio_path:
+            ffmpeg_cmd += ["-c:a", "aac", "-b:a", "128k", "-shortest"]
 
-    try:
-        ffmpeg_proc = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE)
-    except FileNotFoundError:
-        print(f"FFmpeg 실행 파일을 찾을 수 없습니다: {args.ffmpeg_path}", file=sys.stderr)
-        capture.release()
-        return 1
+        ffmpeg_cmd += [
+            "-f",
+            "mpegts",
+            stream_url,
+        ]
 
-    try:
-        while True:
-            ret, frame = capture.read()
-            if not ret:
-                break
+        try:
+            ffmpeg_proc = subprocess.Popen(ffmpeg_cmd)
+        except FileNotFoundError:
+            print(f"FFmpeg 실행 파일을 찾을 수 없습니다: {args.ffmpeg_path}", file=sys.stderr)
+            capture.release()
+            return 1
 
-            try:
-                ffmpeg_proc.stdin.write(frame.tobytes())
-            except BrokenPipeError:
-                break
-    except KeyboardInterrupt:
-        pass
-    finally:
-        capture.release()
-        if ffmpeg_proc.stdin:
-            ffmpeg_proc.stdin.close()
-        ffmpeg_proc.wait()
+        video_queue = queue.Queue(maxsize=args.video_buffer_chunks)
+        audio_queue = queue.Queue(maxsize=args.audio_buffer_chunks)
+
+        video_writer = threading.Thread(
+            target=fifo_writer,
+            args=(video_fifo, video_queue),
+            daemon=True,
+        )
+        video_writer.start()
+
+        audio_writer = None
+        if args.audio_path:
+            audio_writer = threading.Thread(
+                target=fifo_writer,
+                args=(audio_fifo, audio_queue),
+                daemon=True,
+            )
+            audio_writer.start()
+
+        video_reader = threading.Thread(
+            target=video_producer,
+            args=(capture, video_queue, args.video_chunk_frames),
+            daemon=True,
+        )
+        video_reader.start()
+
+        audio_reader = None
+        if args.audio_path:
+            audio_reader = threading.Thread(
+                target=audio_producer,
+                args=(args.audio_path, audio_queue, args.audio_chunk_frames),
+                daemon=True,
+            )
+            audio_reader.start()
+
+        try:
+            video_reader.join()
+            if audio_reader:
+                audio_reader.join()
+            video_writer.join()
+            if audio_writer:
+                audio_writer.join()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            capture.release()
+            ffmpeg_proc.wait()
 
     return 0
 
