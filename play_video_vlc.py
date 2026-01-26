@@ -4,6 +4,7 @@ import queue
 import subprocess
 import sys
 import tempfile
+import time
 import threading
 import wave
 
@@ -111,8 +112,11 @@ def fifo_writer(fifo_path: str, data_queue: queue.Queue) -> None:
             chunk = data_queue.get()
             if chunk is None:
                 break
-            fifo_file.write(chunk)
-            fifo_file.flush()
+            try:
+                fifo_file.write(chunk)
+                fifo_file.flush()
+            except BrokenPipeError:
+                break
 
 
 def main() -> int:
@@ -141,6 +145,7 @@ def main() -> int:
     width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
     fps = args.fps or capture.get(cv2.CAP_PROP_FPS) or 30.0
+    pts_offset = time.time() % 10000
 
     # 🔹 스트리밍 전송 설정
     stream_url = f"udp://{args.host}:{args.port}?pkt_size=1316"
@@ -153,6 +158,10 @@ def main() -> int:
 
         ffmpeg_cmd = [
             args.ffmpeg_path,
+            "-fflags",
+            "+genpts",
+            "-itsoffset",
+            f"{pts_offset:.3f}",
             "-f",
             "rawvideo",
             "-pix_fmt",
@@ -166,6 +175,8 @@ def main() -> int:
         ]
         if args.audio_path:
             ffmpeg_cmd += [
+                "-itsoffset",
+                f"{pts_offset:.3f}",
                 "-f",
                 "s16le",
                 "-ar",

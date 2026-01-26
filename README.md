@@ -33,6 +33,67 @@ python test_sample_video.py
 - 포트가 다르면 VLC와 전송 코드의 포트를 동일하게 맞춰야 합니다.
 - 방화벽이 UDP를 막고 있으면 로컬호스트에서도 재생이 안 될 수 있습니다.
 
+## Troubleshooting: 연속 전송 시 영상이 멈추는 문제
+
+### PTS란?
+
+PTS(Presentation Time Stamp)는 **디코더가 프레임을 언제 화면/스피커에 내보낼지**를 나타내는 타임스탬프입니다.  
+VLC는 같은 포트로 들어오는 스트림을 **연속된 타임라인**으로 가정하기 때문에, 새 전송에서 PTS가 **뒤로 돌아가거나 0부터 다시 시작**되면 영상 갱신이 거의 되지 않는 문제가 발생할 수 있습니다.
+
+### 문제 증상
+
+- 첫 전송은 정상인데, **바로 다시 전송하면 영상이 거의 움직이지 않음**
+- 오디오는 정상적으로 들림
+- 일정 시간이 지난 뒤 다시 전송하면 정상 복귀
+
+### 원인
+
+새 전송이 시작될 때 **오디오/영상의 PTS가 이전 전송보다 작아지면서** FFmpeg 내부에서 `Queue input is backward in time` 경고가 발생했고,  
+VLC가 이를 **이전 스트림의 연장으로 해석**해 영상 프레임을 제대로 갱신하지 못했습니다.
+
+### 해결 방법
+
+매 전송마다 **PTS를 앞으로 밀어주는 오프셋을 부여**해 타임라인이 항상 증가하도록 만들었습니다.
+
+적용 코드 (`play_video_vlc.py`):
+
+```python
+pts_offset = time.time() % 10000
+
+ffmpeg_cmd = [
+    args.ffmpeg_path,
+    "-fflags",
+    "+genpts",
+    "-itsoffset",
+    f"{pts_offset:.3f}",
+    "-f",
+    "rawvideo",
+    "-pix_fmt",
+    "bgr24",
+    "-video_size",
+    f"{width}x{height}",
+    "-framerate",
+    str(fps),
+    "-i",
+    video_fifo,
+]
+if args.audio_path:
+    ffmpeg_cmd += [
+        "-itsoffset",
+        f"{pts_offset:.3f}",
+        "-f",
+        "s16le",
+        "-ar",
+        str(audio_sample_rate),
+        "-ac",
+        str(audio_channels),
+        "-i",
+        audio_fifo,
+    ]
+```
+
+이렇게 하면 VLC가 **새 전송을 새로운 타임라인**으로 인식해 영상이 즉시 정상 갱신됩니다.
+
 ## 동작 방식 요약 (자세히)
 
 1. `test_sample_video.py`가 테스트에 필요한 경로를 만든 뒤 `play_video_vlc.py`를 실행합니다.
