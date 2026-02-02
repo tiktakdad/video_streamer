@@ -27,6 +27,49 @@ python test_sample_video.py
 
 실행되면 `sample.mp4`의 영상과 `voice_sample.wav`의 오디오가 함께 전송됩니다.
 
+## 도커 실행
+
+기본 실행 파일은 `test_sample_video.py`이며, `STREAM_HOST`/`STREAM_PORT` 환경변수로 전송 대상 호스트/포트를 지정할 수 있습니다.
+
+```bash
+docker build -t video_streamer .
+docker run --rm --network host -e STREAM_HOST=127.0.0.1 -e STREAM_PORT=5004 video_streamer
+```
+
+## 오프라인 도커 빌드
+
+네트워크가 없는 서버에서도 빌드할 수 있도록 **오프라인 번들**을 준비하는 방법입니다.
+
+### 1) 인터넷이 되는 Ubuntu 머신에서 번들 생성
+
+```bash
+./scripts/prepare_offline_bundle.sh
+```
+
+기본 이미지도 오프라인에서 필요하므로 미리 저장합니다.
+
+```bash
+docker pull python:3.11-slim
+docker save -o offline/python_3_11_slim.tar python:3.11-slim
+```
+
+### 2) 오프라인 서버로 파일 전달
+
+아래 항목들을 서버로 복사합니다.
+
+- `offline/debs`
+- `offline/wheels`
+- `offline/python_3_11_slim.tar`
+- 소스 코드 전체
+
+### 3) 오프라인 서버에서 빌드/실행
+
+```bash
+docker load -i offline/python_3_11_slim.tar
+docker build --network=none -f Dockerfile.offline -t video_streamer_offline .
+docker run --rm --network host -e STREAM_HOST=127.0.0.1 -e STREAM_PORT=5004 video_streamer_offline
+```
+
 ## 문제 해결 팁
 
 - 영상/음성이 안 나오면 **VLC가 먼저 열려 있는지** 확인하세요.

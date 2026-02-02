@@ -20,8 +20,16 @@ def main() -> int:
         print(f"voice_sample.wav 파일을 찾을 수 없습니다: {audio_path}", file=sys.stderr)
         return 1
 
-    host = "127.0.0.1"
-    port = 5004
+    host = os.getenv("STREAM_HOST", "127.0.0.1").strip() or "127.0.0.1"
+    port_raw = os.getenv("STREAM_PORT", "5004").strip() or "5004"
+    try:
+        port = int(port_raw)
+    except ValueError:
+        print(
+            f"STREAM_PORT 값이 올바르지 않습니다: {port_raw}. 기본값 5004 사용",
+            file=sys.stderr,
+        )
+        port = 5004
     print(f"VLC에서 네트워크 스트림 열기: udp://@:{port}")
     return subprocess.call(
         [

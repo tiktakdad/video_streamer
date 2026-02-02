@@ -1,0 +1,22 @@
+FROM python:3.11-slim
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+WORKDIR /app
+
+COPY offline/debs /opt/debs
+RUN dpkg -i /opt/debs/*.deb
+
+COPY offline/wheels /opt/wheels
+COPY requirements.txt .
+RUN PIP_NO_INDEX=1 PIP_FIND_LINKS=/opt/wheels \
+    pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+ENV STREAM_HOST=127.0.0.1
+ENV STREAM_PORT=5004
+
+EXPOSE 5004/udp
+
+ENTRYPOINT ["python", "/app/test_sample_video.py"]
