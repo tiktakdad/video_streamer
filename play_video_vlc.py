@@ -107,16 +107,19 @@ def audio_producer(
 
 
 def fifo_writer(fifo_path: str, data_queue: queue.Queue) -> None:
-    with open(fifo_path, "wb") as fifo_file:
-        while True:
-            chunk = data_queue.get()
-            if chunk is None:
-                break
-            try:
-                fifo_file.write(chunk)
-                fifo_file.flush()
-            except BrokenPipeError:
-                break
+    try:
+        with open(fifo_path, "wb") as fifo_file:
+            while True:
+                chunk = data_queue.get()
+                if chunk is None:
+                    break
+                try:
+                    fifo_file.write(chunk)
+                    fifo_file.flush()
+                except (BrokenPipeError, OSError):
+                    break
+    except (BrokenPipeError, OSError):
+        return
 
 
 def main() -> int:
