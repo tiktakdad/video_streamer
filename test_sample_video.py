@@ -31,19 +31,18 @@ def main() -> int:
         )
         port = 5004
     print(f"VLC에서 네트워크 스트림 열기: udp://@:{port}")
-    return subprocess.call(
-        [
-            sys.executable,
-            player_script,
-            video_path,
-            "--host",
-            host,
-            "--port",
-            str(port),
-            "--audio-path",
-            audio_path,
-        ],
-    )
+    cmd = [
+        sys.executable,
+        player_script,
+        video_path,
+        "--host",
+        host,
+        "--port",
+        str(port),
+        "--audio-path",
+        audio_path,
+    ]
+    return subprocess.call(cmd)
 
 
 if __name__ == "__main__":
